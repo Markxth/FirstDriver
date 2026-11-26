@@ -26,4 +26,24 @@ An unused variable will always result in a warning; hence, UNREFERENCED_PARAMTER
 
 Note : we do not have a registry path as this is a custom driver, so there is no ZwOpenKey or ZwQueryValue function that can run on a reigstry key, supplied by Windows.
 
-3.  
+3. SystemBuffer type-casting into request.
+
+When I first wrote the line
+
+"		auto request = reinterpret_cast<Request*>(irp->AssociatedIrp.SystemBuffer); //access request object sent from user-mode. " 
+
+I was confused on what this does, and why. Now, after figuring it out it seems simple, but here is the explanation still. We type cast the input from SystemBuffer into
+Request, to then be able to unpack the info sent through DeviceIoControl into the irp. Because we set the flag to DO_BUFFERED_IO, the input is coppied by the I/O 
+manager into a kernel-allocated buffer. We are given a pointer to it, called SystemBuffer. We access it, to then access our own input. It is also used for output,
+which is why it is defined as PVOID.
+
+4. case code::read's MmCopyVirtualMemory order for processes is reversed. Why? 
+
+That is because when reading, as in, taking info from the target and storing it in our process, the order is reversed. We want to have the process we cannot control as our source,
+and the process that we currently have as the place where we store info, as in, the target.
+
+For writing, the order is the classic one.
+
+5. What even is MmCOpyVirtualMemory? 
+
+
