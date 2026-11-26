@@ -1,0 +1,29 @@
+Some of the following notes may come in handy for whomsoever may be reading this. 
+
+1. DriverEntry
+
+DriverEntry's official definition on MSDN is :
+
+NTSTATUS DriverEntry(
+  _In_ PDRIVER_OBJECT  DriverObject,
+  _In_ PUNICODE_STRING RegistryPath
+);
+
+
+Yet my code has none of those. That is because of the way KdMapper works, that is, it manually maps the driver. This means I had to define my own "version of main",
+which in code appears as driver_main(), and is a thing commonly seen - I even saw it in a reverse engineering challenge I had to do. This helps bypass some routine checks.
+
+Specifically: 
+-Driver signature enforcement.
+-Code Integrity policy checks.
+-Driver image loading and validation.
+-Normal driver registration and initialization.
+
+2. UNREFERENCED_PARAMTER
+
+This thing took me a while to get, but it is as simple as the fact that we do not use all the variables that are floating around, and kernels treat warnings as errors.
+An unused variable will always result in a warning; hence, UNREFERENCED_PARAMTER on any unused variable to avoid warnings.
+
+Note : we do not have a registry path as this is a custom driver, so there is no ZwOpenKey or ZwQueryValue function that can run on a reigstry key, supplied by Windows.
+
+3.  
