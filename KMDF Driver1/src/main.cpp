@@ -1,16 +1,30 @@
+/*
+Some notes for the following code, to not fill the code with comments.
+
+Vocab: 
+DPFLTR = Debug Print Filter. It is a filter that allows you to filter out debug messages based on the component and level of the message
+CSPTR = const string pointer. A macro for const char* 
+
+
+Concepts : For debug_print, since I don't want it to be compiled, I did #ifndef DEBUG, where DEBUG is a preprocessor symbol that would be in the project settings.
+
+*/
+
 #include<ntifs.h> 
 
 #define NT_SUCCESS(Status)  (((NTSTATUS)(Status)) >= 0)
 
-
 //forward declarations
-extern "C" {
+
+extern "C" { //extern for dealing with name-mangling
+
+//notes : NTKERNELAPI is a macro that lets the compiler know that the function is a Kernel API import/export, as in, provided by Windows. NTSTATUS will be the return type of the function.
 	NTKERNELAPI NTSTATUS IoCreateDriver( //make IOCTL driver compatible with kdmapper
 		PUNICODE_STRING driver_name,
 		PDRIVER_INITIALIZE InitFunc);
 
-	NTKERNELAPI NTSTATUS MmCopyVirtualMemory( //implement RW process memory in our driver 
-		PEPROCESS SourceProc,
+	NTKERNELAPI NTSTATUS MmCopyVirtualMemory( //implement RW process memory in our driver ; 
+		PEPROCESS SourceProc,		
 		PVOID SourceAddy,
 		PEPROCESS TargetProc,
 		PVOID TargetAddy,
@@ -19,10 +33,20 @@ extern "C" {
 		PSIZE_T RetSize
 	);
 }
-// forward declaration for debug printing used in driver functions
-void debug_print(PCSTR text);
+void debug_print(PCSTR text); { //where PCSTR is equivalent to const char* .
+	//because KdPrintEx is lengthy, we will make a wrapper function for it.
+#ifndef DEBUG
+	UNREFERENCED_PARAMETER(text); 
+#endif 
 
-//-------forward done ----------- 
+	KdPrintEx((
+		DPFLTR_IHDRIVER_ID,
+		DPFLTR_INFO_LEVEL,
+		text 
+		) //it has to be called with 2 () 
+	); 
+}
+//note : only kernel mode drivers can call this as per NtDocs' remarks
 
 
 //driver namespace. Since the Windows Kernel is enormous, we need to def our own namespaces, to not risk having a var with the same name as another var
@@ -69,10 +93,10 @@ namespace driver {
 
 	NTSTATUS device_control(PDEVICE_OBJECT device_object, PIRP irp) {
 		UNREFERENCED_PARAMETER(device_object);
-		debug_print("Device control called. \n "); 
+		debug_print("Device control called as an unreferenced parameter. \n "); 
 		
 		NTSTATUS status = STATUS_UNSUCCESSFUL;
-		PIO_STACK_LOCATION stack_irp = IoGetCurrentIrpStackLocation(irp); //determine the code that was passed through; aka get the pointer to the driver's specific frame
+		PIO_STACK_LOCATION stack_irp = IoGetCurrentIrpStackLocation(irp); //aka get the pointer to the driver's specific frame. IRP = IO Request Packet
 
 		auto request = reinterpret_cast<Request*>(irp->AssociatedIrp.SystemBuffer); //access request obj. sent from user-mode
 
