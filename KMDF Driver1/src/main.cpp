@@ -1,244 +1,302 @@
 /*
 Some notes for the following code, to not fill the code with comments.
 
-Vocab: 
-DPFLTR = Debug Print Filter. It is a filter that allows you to filter out debug messages based on the component and level of the message
-CSPTR = const string pointer. A macro for const char* 
+Vocab:
+DPFLTR = Debug Print Filter. A filter that allows you to filter debug messages
+based on the component and level of the message.
+PCSTR = const char*.
 
+Good to know:
+For debug_print, I use #ifdef DEBUG so that debug output is compiled only
+when DEBUG is defined in the project settings.
 
-Concepts : For debug_print, since I don't want it to be compiled, I did #ifndef DEBUG, where DEBUG is a preprocessor symbol that would be in the project settings.
+CTL codes are constexpr.
+An EPROCESS is a Windows process object in the kernel.
 
+KdMapper-specifics:
+DriverEntry has no DriverObject or registry path. See notes.txt for explanations.
 */
 
-#include<ntifs.h> 
+#include <ntifs.h>
 
-#define NT_SUCCESS(Status)  (((NTSTATUS)(Status)) >= 0)
+#define NT_SUCCESS(Status) (((NTSTATUS)(Status)) >= 0)
 
-//forward declarations
+// Forward declarations
 
-extern "C" { //extern for dealing with name-mangling
+extern "C" {
 
-//notes : NTKERNELAPI is a macro that lets the compiler know that the function is a Kernel API import/export, as in, provided by Windows. NTSTATUS will be the return type of the function.
-	NTKERNELAPI NTSTATUS IoCreateDriver( //make IOCTL driver compatible with kdmapper
-		PUNICODE_STRING driver_name,
-		PDRIVER_INITIALIZE InitFunc);
+    NTKERNELAPI NTSTATUS IoCreateDriver(
+        PUNICODE_STRING driver_name,
+        PDRIVER_INITIALIZE InitFunc
+    );
 
-	NTKERNELAPI NTSTATUS MmCopyVirtualMemory( //implement RW process memory in our driver ; 
-		PEPROCESS SourceProc,		
-		PVOID SourceAddy,
-		PEPROCESS TargetProc,
-		PVOID TargetAddy,
-		SIZE_T bufferSize,
-		KPROCESSOR_MODE ProcessMode,
-		PSIZE_T RetSize
-	);
+    NTKERNELAPI NTSTATUS MmCopyVirtualMemory(
+        PEPROCESS SourceProcess,
+        PVOID SourceAddress,
+        PEPROCESS TargetProcess,
+        PVOID TargetAddress,
+        SIZE_T BufferSize,
+        KPROCESSOR_MODE PreviousMode,
+        PSIZE_T ReturnSize
+    );
 }
-void debug_print(PCSTR text); { //where PCSTR is equivalent to const char* .
-	//because KdPrintEx is lengthy, we will make a wrapper function for it.
-#ifndef DEBUG
-	UNREFERENCED_PARAMETER(text); 
-#endif 
 
-	KdPrintEx((
-		DPFLTR_IHDRIVER_ID,
-		DPFLTR_INFO_LEVEL,
-		text 
-		) //it has to be called with 2 () 
-	); 
-}
-//note : only kernel mode drivers can call this as per NtDocs' remarks
+void debug_print(PCSTR text);
 
-
-//driver namespace. Since the Windows Kernel is enormous, we need to def our own namespaces, to not risk having a var with the same name as another var
+// Driver namespace
 namespace driver {
 
-	namespace code {
-		//for attaching to a process. This comes before r/w
-		constexpr ULONG attach = CTL_CODE(FILE_DEVICE_UNKNOWN, 0x696, METHOD_BUFFERED, FILE_SPECIAL_ACCESS); 
-			//constexpr because CTL_CODE itself  returns a const
+    namespace code {
 
-		//note : CTL_CODE is used for defining codes which are 32-bit integers that are passed by  a umode app to the driver via DeviceIoControl 
-		//CTL_CODE(DeviceType, function ( 0x800 and above. the rest are microsoft's), Method, Access)
-		constexpr ULONG read = CTL_CODE(FILE_DEVICE_UNKNOWN, 0x697, METHOD_BUFFERED, FILE_SPECIAL_ACCESS);
+        constexpr ULONG attach = CTL_CODE(
+            FILE_DEVICE_UNKNOWN, 0x696, METHOD_BUFFERED, FILE_ANY_ACCESS
+        );
 
-		constexpr ULONG write = CTL_CODE(FILE_DEVICE_UNKNOWN, 0x698, METHOD_BUFFERED, FILE_SPECIAL_ACCESS);
+        constexpr ULONG read = CTL_CODE(
+            FILE_DEVICE_UNKNOWN, 0x697, METHOD_BUFFERED, FILE_SPECIAL_ACCESS
+        );
 
-	}
+        constexpr ULONG write = CTL_CODE(
+            FILE_DEVICE_UNKNOWN, 0x698, METHOD_BUFFERED, FILE_SPECIAL_ACCESS
+        );
+    }
 
-	//structs for user mode and kernel mode - shared
-	struct Request {
-		HANDLE process_id; //proc we try hack
+    // Shared user-mode and kernel-mode request structure
+    struct Request {
+        HANDLE process_id;
+        PVOID target;
+        PVOID buffer;
+        SIZE_T size;
+        SIZE_T return_size;
+    };
 
-		PVOID buffer;
-		PVOID target_id; //set buffer ro r/w proc memo. Has to do with MmCopy...  
+    NTSTATUS create(PDEVICE_OBJECT device_object, PIRP irp) {
 
-		SIZE_T size; 
-		SIZE_T return_size; 
+        UNREFERENCED_PARAMETER(device_object);
 
-	};
+        IoCompleteRequest(irp, IO_NO_INCREMENT);
 
-	NTSTATUS create(PDEVICE_OBJECT device_object, PIRP irp) {
-		UNREFERENCED_PARAMETER(device_object); 
-		IoCompleteRequest(irp, IO_NO_INCREMENT); 
+        return irp->IoStatus.Status;
+    }
 
-		return irp->IoStatus.Status; 
-	}
+    NTSTATUS close(PDEVICE_OBJECT device_object, PIRP irp) {
 
-	NTSTATUS close(PDEVICE_OBJECT device_object, PIRP irp) {
-		UNREFERENCED_PARAMETER(device_object);
-		IoCompleteRequest(irp, IO_NO_INCREMENT);
+        UNREFERENCED_PARAMETER(device_object);
 
-		return irp->IoStatus.Status; 
-	}
+        IoCompleteRequest(irp, IO_NO_INCREMENT);
 
-	NTSTATUS device_control(PDEVICE_OBJECT device_object, PIRP irp) {
-		UNREFERENCED_PARAMETER(device_object);
-		debug_print("Device control called as an unreferenced parameter. \n "); 
-		
-		NTSTATUS status = STATUS_UNSUCCESSFUL;
-		PIO_STACK_LOCATION stack_irp = IoGetCurrentIrpStackLocation(irp); //aka get the pointer to the driver's specific frame. IRP = IO Request Packet
+        return irp->IoStatus.Status;
+    }
 
-		auto request = reinterpret_cast<Request*>(irp->AssociatedIrp.SystemBuffer); //access request obj. sent from user-mode
+    NTSTATUS device_control(PDEVICE_OBJECT device_object, PIRP irp) {
 
-		// against the blue screens
-		if (stack_irp == nullptr || request == nullptr) {
-			irp->IoStatus.Status = STATUS_INVALID_PARAMETER; 
-			irp->IoStatus.Information = 0; 
-			IoCompleteRequest(irp, IO_NO_INCREMENT);
-			return status; 
-		}
+        UNREFERENCED_PARAMETER(device_object);
 
-		static PEPROCESS target_process = nullptr; 
+        debug_print("Device control called, device object is working.\n");
 
-		const ULONG control_code = stack_irp->Parameters.DeviceIoControl.IoControlCode; 
+        NTSTATUS status = STATUS_UNSUCCESSFUL;
 
-		switch (control_code) {
+        PIO_STACK_LOCATION stack_irp =
+            IoGetCurrentIrpStackLocation(irp);
 
-		case code::attach : 
-			status = PsLookupProcessByProcessId(request->process_id, &target_process); 
-			break;
+        auto request = reinterpret_cast<Request*>(
+            irp->AssociatedIrp.SystemBuffer
+            );
 
-		case code::read :
-			if (target_process != nullptr) {
-				status = MmCopyVirtualMemory(
-					target_process,
-					request->target_id,
-					PsGetCurrentProcess(), //current process
-					request->buffer,
-					request->size,
-					KernelMode,
-					&request-> return_size
-				); 
-			}
-			break;
+        // Against BSOD
+        if (stack_irp == nullptr || request == nullptr) {
 
-		case code::write : 
-			if (target_process != nullptr) {
-				status = MmCopyVirtualMemory(
-					PsGetCurrentProcess(),
-					request->buffer,
-					target_process, //current process
-					request->target_id,
-					request->size,
-					KernelMode,
-					&request->return_size
-				);
-			}
-			break; 
-		default :
-			break; 
-		}
+            irp->IoStatus.Status = STATUS_INVALID_PARAMETER;
+            irp->IoStatus.Information = 0;
 
-		irp->IoStatus.Status = status; 
+            IoCompleteRequest(irp, IO_NO_INCREMENT);
 
-		if (NT_SUCCESS(status)) {
-			irp->IoStatus.Information = sizeof(Request); 
-		}
-		else {
-			irp->IoStatus.Information = 0; 
-		}
+            return status;
+        }
 
-		IoCompleteRequest(irp, IO_NO_INCREMENT); 
+        static PEPROCESS target_process = nullptr;
 
-		return irp->IoStatus.Status;
-	}
+        const ULONG control_code =
+            stack_irp->Parameters.DeviceIoControl.IoControlCode;
+
+        switch (control_code) {
+
+        case code::attach:
+
+            status = PsLookupProcessByProcessId(
+                request->process_id,
+                &target_process
+            );
+
+            break;
+
+        case code::read:
+
+            if (target_process != nullptr) {
+
+                status = MmCopyVirtualMemory(
+                    target_process,
+                    request->target,
+                    PsGetCurrentProcess(),
+                    request->buffer,
+                    request->size,
+                    KernelMode,
+                    &request->return_size
+                );
+            }
+
+            break;
+
+        case code::write:
+
+            if (target_process != nullptr) {
+
+                status = MmCopyVirtualMemory(
+                    PsGetCurrentProcess(),
+                    request->buffer,
+                    target_process,
+                    request->target,
+                    request->size,
+                    KernelMode,
+                    &request->return_size
+                );
+            }
+
+            break;
+
+        default:
+
+            break;
+        }
+
+        irp->IoStatus.Status = status;
+
+        if (NT_SUCCESS(status)) {
+            irp->IoStatus.Information = sizeof(Request);
+        }
+        else {
+            irp->IoStatus.Information = 0;
+        }
+
+        IoCompleteRequest(irp, IO_NO_INCREMENT);
+
+        return irp->IoStatus.Status;
+    }
 }
 
+// Debug print implementation
 void debug_print(PCSTR text) {
-#ifdef DEBUG 
-	UNREFERENCED_PARAMETER(text); 
-#endif //
 
-	KdPrintEx((
-		DPFLTR_IHVDRIVER_ID, 
-		DPFLTR_INFO_LEVEL,
-		text
-	)); //note the double () , that is because this is a macro, and it works only with debug tools, and not with a typical console.
+#ifdef DEBUG
+
+    KdPrintEx((
+        DPFLTR_IHVDRIVER_ID,
+        DPFLTR_INFO_LEVEL,
+        "%s",
+        text
+        ));
+
+#else
+
+    UNREFERENCED_PARAMETER(text);
+
+#endif
 }
 
-NTSTATUS DriverMain(PDRIVER_OBJECT driverObject, PUNICODE_STRING registre_path) {
-	UNREFERENCED_PARAMETER(registre_path); //if we do not use something and do not explicitly say it is unreferenced, it does not comppile.
-	
-	//driver Iocode
+NTSTATUS driver_main(
+    PDRIVER_OBJECT driver_object,
+    PUNICODE_STRING registry_path
+) {
 
-	UNICODE_STRING drivername = {}; 
-	RtlInitUnicodeString(&drivername, L"\\Driver\\KMDF Driver1"); 
+    UNREFERENCED_PARAMETER(registry_path);
 
-	//device object
+    UNICODE_STRING device_name = {};
 
-	PDEVICE_OBJECT dev_obj = nullptr;
-	NTSTATUS status = IoCreateDevice(
-		driverObject,
-		0,
-		&drivername, //pass the PUNICODE_STRING 
-		FILE_DEVICE_UNKNOWN,
-		FILE_DEVICE_SECURE_OPEN,
-		FALSE,
-		&dev_obj
-	); 
+    RtlInitUnicodeString(
+        &device_name,
+        L"\\Device\\KMDF Driver1"
+    );
 
-	if (status != STATUS_SUCCESS) {
-		debug_print("Could not a driver device\n");
-		return status;
-	} 
-	
-	debug_print("Created a driver object!\n"); 
+    // Create the device object
+    PDEVICE_OBJECT device_object = {};
 
-	//symbolic link time
-	PUNICODE_STRING symbolic_link = nullptr; 
-	RtlInitUnicodeString(symbolic_link, L"\\DosDevices\\KMDF Driver1"); 
+    NTSTATUS status = IoCreateDevice(
+        driver_object,
+        0,
+        &device_name,
+        FILE_DEVICE_UNKNOWN,
+        FILE_DEVICE_SECURE_OPEN,
+        FALSE,
+        &device_object
+    );
 
-	status = IoCreateSymbolicLink(symbolic_link, &drivername); 
-		if (status != STATUS_SUCCESS) {
-			debug_print("Failed to create a symbolic link!"); 
-	}
+    if (status != STATUS_SUCCESS) {
 
-	debug_print("Created a symbolic link!"); 
+        debug_print("Could not create a driver device.\n");
 
+        return status;
+    }
 
-	//IOCTL Setup. 
-	//1. Buffered IO
-	
-	SetFlag(dev_obj->Flags, DO_BUFFERED_IO); 
+    debug_print("Created a driver object!\n");
 
-	//handlers for driver object
-	driverObject->MajorFunction[IRP_MJ_CREATE] = driver::create; 
-	driverObject->MajorFunction[IRP_MJ_CLOSE] = driver::close;
-	driverObject->MajorFunction[IRP_MJ_DEVICE_CONTROL] = driver::device_control; 
-	
-	ClearFlag(dev_obj->Flags, DO_DEVICE_INITIALIZING); 
+    // Create the symbolic link
+    UNICODE_STRING symbolic_link = {};
 
-	debug_print("Symbolic link set!"); 
+    RtlInitUnicodeString(
+        &symbolic_link,
+        L"\\DosDevices\\KMDF Driver1"
+    );
 
-	return status ; 
+    status = IoCreateSymbolicLink(
+        &symbolic_link,
+        &device_name
+    );
+
+    if (status != STATUS_SUCCESS) {
+
+        debug_print("Failed to create a symbolic link!\n");
+    }
+    else {
+
+        debug_print("Created a symbolic link!\n");
+    }
+
+    // Set up IO communications
+    SetFlag(device_object->Flags, DO_BUFFERED_IO);
+
+    // Register dispatch handlers
+    driver_object->MajorFunction[IRP_MJ_CREATE] =
+        driver::create;
+
+    driver_object->MajorFunction[IRP_MJ_CLOSE] =
+        driver::close;
+
+    driver_object->MajorFunction[IRP_MJ_DEVICE_CONTROL] =
+        driver::device_control;
+
+    ClearFlag(
+        device_object->Flags,
+        DO_DEVICE_INITIALIZING
+    );
+
+    debug_print("The driver is ready to receive communications.\n");
+
+    return status;
 }
 
 NTSTATUS DriverEntry() {
-	debug_print("a"); 
 
-	UNICODE_STRING driver = {}; 
-	RtlInitUnicodeString(&driver, L"\\Driver\\KMDF Driver1"); // kernels do not like const char. 
+    debug_print("Driver entry test check.\n");
 
-	return IoCreateDriver(&driver, &DriverMain); 
+    UNICODE_STRING driver_name = {};
 
+    RtlInitUnicodeString(
+        &driver_name,
+        L"\\Driver\\KMDF Driver1"
+    );
+
+    return IoCreateDriver(
+        &driver_name,
+        &driver_main
+    );
 }
