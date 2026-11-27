@@ -1,1 +1,1 @@
-This is my firat IOCTL driver. It is an IOCTL driver in particular, and it represents a publicly documented learning journey.
+This is my first IOCTL driver, with its own dedicated user-mode process attacher. It is written to be functional with KdMapper, so some things might look, initially, off. Check notes for more context.
