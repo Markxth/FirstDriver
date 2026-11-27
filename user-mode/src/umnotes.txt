@@ -1,0 +1,3 @@
+From a user-mode app point of view, the proces attacher is going to be different from a classic WinAPI process attaching code, or a an NTAPI process attaching code.
+That is because this one has to go through the driver, so the way it is written is dictated by the driver. 
+
